@@ -1,0 +1,41 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Session {
+  id           String   @id @default(uuid())
+  sessionToken String   @unique
+  ipHash       String
+  userAgent    String?
+  referrer     String?
+  country      String?
+  deviceType   String?
+  createdAt    DateTime @default(now())
+
+  events Event[]
+}
+
+model Event {
+  id        String   @id @default(uuid())
+  sessionId String
+  type      String
+  metadata  Json
+  createdAt DateTime @default(now())
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@index([type])
+  @@index([createdAt])
+}
