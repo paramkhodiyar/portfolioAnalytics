@@ -9,7 +9,7 @@ const app = express();
 const prisma = new PrismaClient();
 const PORT = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || 'super-secret-key-change-me';
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123'; // Simple admin password for now
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '22428374'; // Secured PIN
 
 app.use(cors({
     origin: ['http://localhost:3000', 'https://paramkhodiyar.vercel.app'],
@@ -119,32 +119,26 @@ app.get('/api/analytics/stats', authenticateToken, async (req, res) => {
         // 1. Total Sessions
         const totalSessions = await prisma.session.count();
 
-        // 2. Total Page Views
+        // 2. Total Page Views (Excluding /admin)
         const totalPageViews = await prisma.event.count({
             where: { type: 'page_view' },
         });
 
-        // 3. Top Pages
-        // Group by metadata -> path requires raw query or client processing if JSON.
-        // Prisma doesn't strictly support groupBy on JSON fields easily.
-        // We will fetch recent page_view events and aggregate in memory for simplicity (limiting to last N events for perf)
-        // OR using raw SQL for JSONB. Let's do a safe Raw SQL query for Postgres.
-
-        let topPages = [];
+        // 3. Top Sections (Replacing Top Pages for SPA)
+        let topSections = [];
         try {
-            // Adjust based on your JSON structure. Assuming metadata->>'path'
-            topPages = await prisma.$queryRaw`
-                SELECT metadata->>'path' as path, COUNT(*) as count 
+            // For Top Sections, we want to know which sections people *actually* spent time on.
+            // Using the 'section_view_time' event count is a good proxy for "meaningful visits".
+            topSections = await prisma.$queryRaw`
+                SELECT metadata->>'section' as section, COUNT(*) as count 
                 FROM "Event" 
-                WHERE type = 'page_view' 
-                GROUP BY metadata->>'path' 
+                WHERE type = 'section_view_time' 
+                GROUP BY metadata->>'section' 
                 ORDER BY count DESC 
-                LIMIT 10
             `;
-            // Convert BigInt to Number if necessary (Prisma returns BigInt for count)
-            topPages = topPages.map(p => ({ ...p, count: Number(p.count) }));
+            topSections = topSections.map(p => ({ ...p, count: Number(p.count) }));
         } catch (e) {
-            console.warn("Raw query failed, likely SQLite/Postgres mismatch or JSON structure", e);
+            console.warn("Top sections query failed", e);
         }
 
         // 4. Device Usage
@@ -153,11 +147,59 @@ app.get('/api/analytics/stats', authenticateToken, async (req, res) => {
             _count: { deviceType: true },
         });
 
+        // 5. Visitor Identity (Roles)
+        let visitorRoles = [];
+        try {
+            visitorRoles = await prisma.$queryRaw`
+                SELECT metadata->>'role' as role, COUNT(*) as count
+                FROM "Event"
+                WHERE type = 'visitor_identity'
+                GROUP BY metadata->>'role'
+            `;
+            visitorRoles = visitorRoles.map(p => ({ ...p, count: Number(p.count) }));
+        } catch (e) {
+            console.warn("Role query failed", e);
+        }
+
+        // 6. Section Engagement (Avg Duration)
+        let sectionEngagement = [];
+        try {
+            // Postgres JSONB casting for avg
+            sectionEngagement = await prisma.$queryRaw`
+                SELECT metadata->>'section' as section, AVG(CAST(metadata->>'duration' AS FLOAT)) as avg_duration
+                FROM "Event"
+                WHERE type = 'section_view_time'
+                GROUP BY metadata->>'section'
+            `;
+            sectionEngagement = sectionEngagement.map(p => ({ ...p, avg_duration: Math.round(p.avg_duration) }));
+        } catch (e) {
+            console.warn("Engagement query failed", e);
+        }
+
+        // 7. Clicks (Contact & Projects)
+        let clickStats = [];
+        try {
+            clickStats = await prisma.$queryRaw`
+                SELECT metadata->>'element' as element, metadata->>'project' as project, metadata->>'type' as type, COUNT(*) as count
+                FROM "Event"
+                WHERE type = 'click'
+                GROUP BY metadata->>'element', metadata->>'project', metadata->>'type'
+                ORDER BY count DESC
+                LIMIT 20
+            `;
+            clickStats = clickStats.map(p => ({ ...p, count: Number(p.count) }));
+        } catch (e) {
+            console.warn("Click query failed", e);
+        }
+
         res.json({
             totalSessions,
             totalPageViews,
-            topPages,
+            topSections,
             deviceStats,
+            visitorRoles,
+            sectionEngagement,
+            clickStats
         });
 
     } catch (error) {
