@@ -49,9 +49,6 @@ const authenticateToken = (req, res, next) => {
     });
 };
 
-// --- Routes ---
-
-// Health Check
 app.get('/', (req, res) => {
     res.send('Analytics API is running');
 });
@@ -115,27 +112,53 @@ app.post('/api/track', async (req, res) => {
 // --- Analytics Dashboard Routes (Protected) ---
 
 app.get('/api/analytics/stats', authenticateToken, async (req, res) => {
+    const { range } = req.query; // 'today', 'week', 'month', or default 'all'
+    let startDate = null;
+    const now = new Date();
+
+    if (range === 'today') {
+        startDate = new Date(now.setHours(0, 0, 0, 0));
+    } else if (range === 'week') {
+        startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    } else if (range === 'month') {
+        startDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    }
+
+    const dateFilter = startDate ? { createdAt: { gte: startDate } } : {};
+    const rawDateFilter = startDate ? `AND "createdAt" >= ${startDate.toISOString()}`.replace('AND', 'WHERE') : '';
+
     try {
         // 1. Total Sessions
-        const totalSessions = await prisma.session.count();
+        const totalSessions = await prisma.session.count({ where: dateFilter });
 
-        // 2. Total Page Views (Excluding /admin)
+        // 2. Total Page Views
         const totalPageViews = await prisma.event.count({
-            where: { type: 'page_view' },
+            where: {
+                ...dateFilter,
+                type: 'page_view'
+            },
         });
 
-        // 3. Top Sections (Replacing Top Pages for SPA)
+        // 3. Top Sections
         let topSections = [];
         try {
-            // For Top Sections, we want to know which sections people *actually* spent time on.
-            // Using the 'section_view_time' event count is a good proxy for "meaningful visits".
-            topSections = await prisma.$queryRaw`
-                SELECT metadata->>'section' as section, COUNT(*) as count 
-                FROM "Event" 
-                WHERE type = 'section_view_time' 
-                GROUP BY metadata->>'section' 
-                ORDER BY count DESC 
-            `;
+            if (startDate) {
+                topSections = await prisma.$queryRaw`
+                    SELECT metadata->>'section' as section, COUNT(*) as count 
+                    FROM "Event" 
+                    WHERE type = 'section_view_time' AND "createdAt" >= ${startDate}
+                    GROUP BY metadata->>'section' 
+                    ORDER BY count DESC 
+                `;
+            } else {
+                topSections = await prisma.$queryRaw`
+                    SELECT metadata->>'section' as section, COUNT(*) as count 
+                    FROM "Event" 
+                    WHERE type = 'section_view_time' 
+                    GROUP BY metadata->>'section' 
+                    ORDER BY count DESC 
+                `;
+            }
             topSections = topSections.map(p => ({ ...p, count: Number(p.count) }));
         } catch (e) {
             console.warn("Top sections query failed", e);
@@ -144,18 +167,28 @@ app.get('/api/analytics/stats', authenticateToken, async (req, res) => {
         // 4. Device Usage
         const deviceStats = await prisma.session.groupBy({
             by: ['deviceType'],
+            where: dateFilter,
             _count: { deviceType: true },
         });
 
         // 5. Visitor Identity (Roles)
         let visitorRoles = [];
         try {
-            visitorRoles = await prisma.$queryRaw`
-                SELECT metadata->>'role' as role, COUNT(*) as count
-                FROM "Event"
-                WHERE type = 'visitor_identity'
-                GROUP BY metadata->>'role'
-            `;
+            if (startDate) {
+                visitorRoles = await prisma.$queryRaw`
+                    SELECT metadata->>'role' as role, COUNT(*) as count
+                    FROM "Event"
+                    WHERE type = 'visitor_identity' AND "createdAt" >= ${startDate}
+                    GROUP BY metadata->>'role'
+                `;
+            } else {
+                visitorRoles = await prisma.$queryRaw`
+                    SELECT metadata->>'role' as role, COUNT(*) as count
+                    FROM "Event"
+                    WHERE type = 'visitor_identity'
+                    GROUP BY metadata->>'role'
+                `;
+            }
             visitorRoles = visitorRoles.map(p => ({ ...p, count: Number(p.count) }));
         } catch (e) {
             console.warn("Role query failed", e);
@@ -164,29 +197,48 @@ app.get('/api/analytics/stats', authenticateToken, async (req, res) => {
         // 6. Section Engagement (Avg Duration)
         let sectionEngagement = [];
         try {
-            // Postgres JSONB casting for avg
-            sectionEngagement = await prisma.$queryRaw`
-                SELECT metadata->>'section' as section, AVG(CAST(metadata->>'duration' AS FLOAT)) as avg_duration
-                FROM "Event"
-                WHERE type = 'section_view_time'
-                GROUP BY metadata->>'section'
-            `;
-            sectionEngagement = sectionEngagement.map(p => ({ ...p, avg_duration: Math.round(p.avg_duration) }));
+            if (startDate) {
+                sectionEngagement = await prisma.$queryRaw`
+                    SELECT metadata->>'section' as section, AVG(CAST(metadata->>'duration' AS FLOAT)) as avg_duration
+                    FROM "Event"
+                    WHERE type = 'section_view_time' AND "createdAt" >= ${startDate}
+                    GROUP BY metadata->>'section'
+                `;
+            } else {
+                sectionEngagement = await prisma.$queryRaw`
+                    SELECT metadata->>'section' as section, AVG(CAST(metadata->>'duration' AS FLOAT)) as avg_duration
+                    FROM "Event"
+                    WHERE type = 'section_view_time'
+                    GROUP BY metadata->>'section'
+                `;
+            }
+            sectionEngagement = sectionEngagement.map(p => ({ ...p, avg_duration: Math.round(p.avg_duration || 0) }));
         } catch (e) {
             console.warn("Engagement query failed", e);
         }
 
-        // 7. Clicks (Contact & Projects)
+        // 7. Clicks
         let clickStats = [];
         try {
-            clickStats = await prisma.$queryRaw`
-                SELECT metadata->>'element' as element, metadata->>'project' as project, metadata->>'type' as type, COUNT(*) as count
-                FROM "Event"
-                WHERE type = 'click'
-                GROUP BY metadata->>'element', metadata->>'project', metadata->>'type'
-                ORDER BY count DESC
-                LIMIT 20
-            `;
+            if (startDate) {
+                clickStats = await prisma.$queryRaw`
+                    SELECT metadata->>'element' as element, metadata->>'project' as project, metadata->>'type' as type, COUNT(*) as count
+                    FROM "Event"
+                    WHERE type = 'click' AND "createdAt" >= ${startDate}
+                    GROUP BY metadata->>'element', metadata->>'project', metadata->>'type'
+                    ORDER BY count DESC
+                    LIMIT 20
+                `;
+            } else {
+                clickStats = await prisma.$queryRaw`
+                    SELECT metadata->>'element' as element, metadata->>'project' as project, metadata->>'type' as type, COUNT(*) as count
+                    FROM "Event"
+                    WHERE type = 'click'
+                    GROUP BY metadata->>'element', metadata->>'project', metadata->>'type'
+                    ORDER BY count DESC
+                    LIMIT 20
+                `;
+            }
             clickStats = clickStats.map(p => ({ ...p, count: Number(p.count) }));
         } catch (e) {
             console.warn("Click query failed", e);
