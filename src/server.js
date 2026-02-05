@@ -537,7 +537,7 @@ app.get('/api/analytics/journey', authenticateToken, async (req, res) => {
                     "sessionId",
                     STRING_AGG(metadata->>'path', ' -> ' ORDER BY "createdAt") as path
                 FROM "Event"
-                WHERE type = 'page_view'
+                WHERE type IN ('page_view', 'section_view')
                 GROUP BY "sessionId"
             )
             SELECT path, COUNT(*) as count
