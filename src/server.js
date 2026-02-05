@@ -4,6 +4,8 @@ const cors = require('cors');
 const { PrismaClient } = require('@prisma/client');
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
+const axios = require('axios');
+
 
 const app = express();
 const prisma = new PrismaClient();
@@ -81,6 +83,22 @@ app.post('/api/track', async (req, res) => {
         });
 
         if (!session) {
+            let country = null;
+            let city = null;
+
+            // Fetch location data if not local
+            if (ip && ip !== '::1' && ip !== '127.0.0.1') {
+                try {
+                    const geoRes = await axios.get(`http://ip-api.com/json/${ip}?fields=status,country,city`);
+                    if (geoRes.data.status === 'success') {
+                        country = geoRes.data.country;
+                        city = geoRes.data.city;
+                    }
+                } catch (e) {
+                    console.warn('Geo IP lookup failed', e.message);
+                }
+            }
+
             session = await prisma.session.create({
                 data: {
                     sessionToken,
@@ -88,10 +106,12 @@ app.post('/api/track', async (req, res) => {
                     userAgent,
                     referrer,
                     deviceType: getDeviceType(userAgent),
-                    // country: req.headers['x-vercel-ip-country'] || null, // Optional if hosted on Vercel
+                    country: country || req.headers['x-vercel-ip-country'] || null,
+                    city: city || null,
                 },
             });
         }
+
 
         // Record Event
         await prisma.event.create({
@@ -244,6 +264,46 @@ app.get('/api/analytics/stats', authenticateToken, async (req, res) => {
             console.warn("Click query failed", e);
         }
 
+        // 8. Location Stats
+        const locationStats = await prisma.session.groupBy({
+            by: ['country'],
+            where: {
+                ...dateFilter,
+                country: { not: null }
+            },
+            _count: { country: true },
+            orderBy: { _count: { country: 'desc' } },
+            take: 10
+        });
+
+        // 9. Total Average Session Time (Sum of all section durations per session)
+        let avgTotalTimeResult = [];
+        try {
+            if (startDate) {
+                avgTotalTimeResult = await prisma.$queryRaw`
+                    SELECT AVG(session_total) as avg_total
+                    FROM (
+                        SELECT "sessionId", SUM(CAST(metadata->>'duration' AS FLOAT)) as session_total
+                        FROM "Event"
+                        WHERE type = 'section_view_time' AND "createdAt" >= ${startDate}
+                        GROUP BY "sessionId"
+                    ) as session_durations
+                `;
+            } else {
+                avgTotalTimeResult = await prisma.$queryRaw`
+                    SELECT AVG(session_total) as avg_total
+                    FROM (
+                        SELECT "sessionId", SUM(CAST(metadata->>'duration' AS FLOAT)) as session_total
+                        FROM "Event"
+                        WHERE type = 'section_view_time'
+                        GROUP BY "sessionId"
+                    ) as session_durations
+                `;
+            }
+        } catch (e) {
+            console.warn("Avg total time query failed", e);
+        }
+
         res.json({
             totalSessions,
             totalPageViews,
@@ -251,8 +311,11 @@ app.get('/api/analytics/stats', authenticateToken, async (req, res) => {
             deviceStats,
             visitorRoles,
             sectionEngagement,
-            clickStats
+            clickStats,
+            locationStats,
+            avgSessionDuration: Math.round(avgTotalTimeResult[0]?.avg_total || 0)
         });
+
 
     } catch (error) {
         console.error('Analytics Stats Error:', error);

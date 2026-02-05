@@ -20,6 +20,7 @@ model Session {
   userAgent    String?
   referrer     String?
   country      String?
+  city         String?
   deviceType   String?
   createdAt    DateTime @default(now())
 
