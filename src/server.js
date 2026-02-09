@@ -341,8 +341,11 @@ const PORT = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || 'super-secret-key-change-me';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '22428374';
 
+// Enable trust proxy to get real client IP from Render/Vercel/etc.
+app.set('trust proxy', true);
+
 app.use(cors({
-    origin: ['http://localhost:3000', 'https://paramkhodiyar.vercel.app'],
+    origin: ['http://localhost:3000', 'https://paramkhodiyar.vercel.app', 'http://localhost:5173'],
     methods: ['GET', 'POST'],
     credentials: true
 }));
@@ -394,7 +397,20 @@ app.post('/api/auth/login', (req, res) => {
 app.post('/api/track', async (req, res) => {
     const { sessionToken, type, metadata } = req.body;
     const userAgent = req.headers['user-agent'];
-    const ip = req.ip || req.connection.remoteAddress;
+
+    // Get IP - handling potential proxy headers manually just in case, though trust proxy handles it
+    let ip = req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+
+    // If x-forwarded-for is a list, take the first one
+    if (typeof ip === 'string' && ip.includes(',')) {
+        ip = ip.split(',')[0].trim();
+    }
+
+    // Normalize IPv6 localhost
+    if (ip === '::1' || ip === '::ffff:127.0.0.1') {
+        ip = '127.0.0.1';
+    }
+
     const ipHash = hashIp(ip);
     const referrer = req.headers['referer'] || req.body.referrer || null;
 
@@ -407,15 +423,19 @@ app.post('/api/track', async (req, res) => {
             let country = null;
             let city = null;
 
-            if (ip && ip !== '::1' && ip !== '127.0.0.1') {
+            // Only attempt GeoIP for non-local addresses
+            const isLocal = !ip || ip === '127.0.0.1' || ip.startsWith('192.168.') || ip.startsWith('10.') || ip.startsWith('172.');
+
+            if (!isLocal) {
                 try {
+                    // Try ip-api.com
                     const geoRes = await axios.get(`http://ip-api.com/json/${ip}?fields=status,country,city`);
                     if (geoRes.data.status === 'success') {
                         country = geoRes.data.country;
                         city = geoRes.data.city;
                     }
                 } catch (e) {
-                    console.warn('Geo IP lookup failed', e.message);
+                    console.warn(`Geo IP lookup failed for IP ${ip}:`, e.message);
                 }
             }
 
@@ -426,8 +446,8 @@ app.post('/api/track', async (req, res) => {
                     userAgent,
                     referrer,
                     deviceType: getDeviceType(userAgent),
-                    country: country || req.headers['x-vercel-ip-country'] || null,
-                    city: city || null,
+                    country: country || req.headers['x-vercel-ip-country'] || (isLocal ? 'Local' : null),
+                    city: city || (isLocal ? 'Development' : null),
                 },
             });
         }
