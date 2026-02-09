@@ -447,7 +447,7 @@ app.post('/api/track', async (req, res) => {
                     referrer,
                     deviceType: getDeviceType(userAgent),
                     country: country || req.headers['x-vercel-ip-country'] || (isLocal ? 'Local' : null),
-                    city: city || (isLocal ? 'Development' : null),
+                    city: city || (isLocal ? 'Development' : (country || req.headers['x-vercel-ip-country'] ? 'Unknown' : null)),
                 },
             });
         }
@@ -805,6 +805,19 @@ app.get('/api/analytics/stats', authenticateToken, async (req, res) => {
             take: 10
         });
 
+        // NEW: City-level stats
+        const cityStats = await prisma.session.groupBy({
+            by: ['country', 'city'],
+            where: {
+                ...dateFilter,
+                country: { not: null },
+                city: { not: null }
+            },
+            _count: { city: true },
+            orderBy: { _count: { city: 'desc' } },
+            take: 15
+        });
+
         let avgTotalTimeResult = [];
         try {
             if (startDate) {
@@ -878,6 +891,11 @@ app.get('/api/analytics/stats', authenticateToken, async (req, res) => {
             sectionEngagement,
             clickStats,
             locationStats,
+            cityStats: cityStats.map(c => ({
+                country: c.country,
+                city: c.city,
+                count: c._count.city
+            })),
             scrollDepthStats,
             avgSessionDuration: Math.round(avgTotalTimeResult[0]?.avg_total || 0)
         });
